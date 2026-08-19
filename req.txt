@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+PyJWT
+redis
+requests
+pymongo
+tabulate
+pandas
+numpy
+psutil
+pytz
+python-multipart
