@@ -580,17 +580,11 @@ def get_trading_snapshot(session_id: str ,x_plugin_api_key: str = Header(None)):
 
 # ---- Redis (used to receive per-ticker RMS exit signals from the worker process) ----
 import os as _os
+from client import build_redis_client
 try:
-    import redis as _redis
-    _rms_redis = _redis.RedisCluster(
-        host=_os.environ.get("REDIS_HOST", "10.45.41.115"),
-        port=int(_os.environ.get("REDIS_PORT", "6379")),
-        ssl=True,
-        ssl_cert_reqs=None,
-        decode_responses=True,
-        socket_connect_timeout=5,
-    )
-    _rms_redis.ping()
+    _rms_redis = build_redis_client()
+    if _rms_redis is not None:
+        _rms_redis.ping()
 except Exception as _e:
     print(f"[API SERVER] RMS redis client unavailable: {_e}")
     _rms_redis = None

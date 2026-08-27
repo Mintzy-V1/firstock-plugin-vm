@@ -307,6 +307,31 @@ class PredictionClient:
 # MARKET CLIENT (ONLY redis + upstox)
 # ==========================================================
 
+def build_redis_client():
+    """Build a Redis client. Falls back from RedisCluster to a plain
+    single-node client (this VM runs a standalone redis-server)."""
+    kwargs = dict(
+        host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+        port=int(os.environ.get("REDIS_PORT", "6379")),
+        ssl=os.environ.get("REDIS_SSL", "false").lower() == "true",
+        ssl_cert_reqs=None,
+        decode_responses=True,
+        socket_connect_timeout=5,
+    )
+    try:
+        rc = redis.RedisCluster(**kwargs)
+        rc.ping()
+        return rc
+    except Exception:
+        try:
+            rc = redis.Redis(**kwargs)
+            rc.ping()
+            return rc
+        except Exception as e:
+            print("[REDIS] NOT available:", e)
+            return None
+
+
 class MarketClient:
 
     def __init__(self):
@@ -321,20 +346,9 @@ class MarketClient:
     # ---------------- INIT ----------------
 
     def _init_redis(self):
-        try:
-            self.redis_client = redis.RedisCluster(
-                host=os.environ.get("REDIS_HOST", "10.45.41.115"),
-                port=int(os.environ.get("REDIS_PORT", "6379")),
-                ssl=True,
-                ssl_cert_reqs=None,
-                decode_responses=True,
-                socket_connect_timeout=5,
-            )
-            self.redis_client.ping()
+        self.redis_client = build_redis_client()
+        if self.redis_client:
             print("[MARKET CLIENT] Redis connected")
-        except Exception as e:
-            print("[MARKET CLIENT] Redis NOT available:", e)
-            self.redis_client = None
 
     def _load_access_token(self):
         self.access_token = get_access_token()
