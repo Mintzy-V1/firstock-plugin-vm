@@ -563,11 +563,7 @@ class SessionManager:
         broker_config = broker_config_from_session(session_doc)
         
         # Get MongoDB connection details
-        mongo_uri = os.environ.get(
-            "MONGO_URI",
-            "mongodb+srv://ankitarrow:ankitarrow@cluster0.zcajdur.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-        )
-        mongo_db_name = os.environ.get("MONGO_DB_NAME", "mintzy_plugin")
+        mongo_uri, mongo_db_name = cls._mongo_settings()
         
         # Create stop event and health queue for this worker
         cls._ensure_manager()
