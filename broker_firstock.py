@@ -601,26 +601,26 @@ class BrokerConnector:
             return {"status": "error", "error": str(e)}
 
     # ---- LTP (real quotes: getQuote/ltp, getMultiQuotes/ltp) ----
+    # ponytail: Firstock quote endpoints key on tradingSymbol (not token);
+    # _quote_items builds {exchange, tradingSymbol} and maps responses back
+    # by the same tradingSymbol so the engine sees its plain symbol names.
     def _quote_items(self, symbols, exchange="NSE"):
-        items, by_token = [], {}
+        items, by_sym = [], {}
         for s in symbols:
-            token = self.get_symbol_token(s)
-            if token:
-                items.append({"exchange": self._map_exchange(exchange), "token": token})
-                by_token[token] = s.upper()
-        return items, by_token
+            tsym = self._ensure_eq(s)
+            items.append({"exchange": self._map_exchange(exchange), "tradingSymbol": tsym})
+            by_sym[tsym] = s.upper()
+        return items, by_sym
 
     def get_ltp(self, session, exchange, trading_symbol, symbol_token):
         if not session or "obj" not in session:
             return {"status": "error", "error": "No active session object provided."}
         try:
-            token = symbol_token or self.get_symbol_token(trading_symbol)
-            if not token:
-                return {"status": "error", "error": f"Token not found for {trading_symbol}"}
-            resp = self._call_api(session["obj"].get_quote_ltp, [{"exchange": self._map_exchange(exchange), "token": token}])
+            tsym = self._ensure_eq(trading_symbol)
+            resp = self._call_api(session["obj"].get_quote_ltp, [{"exchange": self._map_exchange(exchange), "tradingSymbol": tsym}])
             ltp = 0.0
             for row in resp.get("data") or []:
-                if str(row.get("token")) == str(token):
+                if str(row.get("tradingSymbol") or "").upper() == tsym:
                     ltp = float(row.get("lastTradedPrice") or row.get("last_traded_price") or 0)
                     break
             return {"status": "success", "raw": {"status": True, "data": {"ltp": ltp}}}
@@ -635,7 +635,7 @@ class BrokerConnector:
         syms = [s.upper() for s in symbols if s]
         if not syms:
             return {}
-        items, by_token = self._quote_items(syms, exchange=exchange)
+        items, by_sym = self._quote_items(syms, exchange=exchange)
         if not items:
             return {}
         try:
@@ -650,7 +650,7 @@ class BrokerConnector:
             price = float(row.get("lastTradedPrice") or row.get("last_traded_price") or 0)
             if price <= 0:
                 continue
-            sym = by_token.get(str(row.get("token") or ""))
+            sym = by_sym.get(str(row.get("tradingSymbol") or "").upper())
             if sym and sym not in out:
                 out[sym] = price
         return out
@@ -696,7 +696,7 @@ if __name__ == "__main__":
             return {"data": {"orderNumber": "O123"}}
         def get_multi_quotes_ltp(self, items):
             assert items, items
-            return {"data": [{"token": "2885", "lastTradedPrice": "105.50"}]}
+            return {"data": [{"tradingSymbol": "RELIANCE-EQ", "lastTradedPrice": "105.50"}]}
 
     broker = BrokerConnector()
     broker.obj = FakeClient()

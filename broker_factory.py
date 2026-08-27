@@ -37,9 +37,13 @@ def set_broker_env(broker_config: Dict[str, Any]) -> str:
         or broker_config.get("user_id")
         or broker_config.get("client_code", "")
     )
-    os.environ["FIRSTOCK_API_KEY"] = broker_config.get("api_key", "")
-    os.environ["FIRSTOCK_PASSWORD"] = broker_config.get("password", "")
-    os.environ["FIRSTOCK_VENDOR_CODE"] = broker_config.get("vendor_code", "")
+    os.environ["FIRSTOCK_API_KEY"] = broker_config.get("api_key") or ""
+    os.environ["FIRSTOCK_PASSWORD"] = broker_config.get("password") or ""
+    # ponytail: FE proxy drops vendor_code; Firstock convention is {client_code}_API
+    os.environ["FIRSTOCK_VENDOR_CODE"] = (
+        broker_config.get("vendor_code")
+        or f"{broker_config.get('client_code') or ''}_API"
+    )
     os.environ["FIRSTOCK_BASE_URL"] = broker_config.get("base_url") or DEFAULT_FIRSTOCK_BASE_URL
     if broker_config.get("websocket_url"):
         os.environ["FIRSTOCK_MESSAGE_SOCKET"] = broker_config.get("websocket_url")
