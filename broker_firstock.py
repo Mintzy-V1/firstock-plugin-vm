@@ -38,7 +38,7 @@ EXCHANGE_MAP = {
     "NCDEX": "NCDEX", "NCDEX_FO": "NCDEX",
 }
 ORDER_TYPE_MAP = {"MARKET": "MKT", "LIMIT": "LMT", "SL": "SL-LMT", "SL-MKT": "SL-MKT"}
-PRODUCT_TYPE_MAP = {"INTRADAY": "M", "CNC": "C", "DELIVERY": "C", "BTST": "C", "MTF": "I"}
+PRODUCT_TYPE_MAP = {"INTRADAY": "I", "CNC": "C", "DELIVERY": "C", "BTST": "C", "MTF": "I"}
 TERMINAL_STATUSES = {
     "REJECTED": "rejected", "CANCELED": "cancelled", "CANCELLED": "cancelled",
     "COMPLETE": "filled", "FILLED": "filled", "EXECUTED": "filled",
@@ -525,7 +525,7 @@ class BrokerConnector:
                 "orderNumber": order_id,
                 "exchange": current.get("exchange") or "NSE",
                 "retention": current.get("retention") or "DAY",
-                "product": current.get("product") or "M",
+                "product": current.get("product") or "I",
                 "priceType": price_type,
                 "tradingSymbol": current.get("tradingSymbol") or self._ensure_eq(kwargs.get("symbol") or ""),
                 "mkt_protection": "1" if price_type in ("MKT", "SL-MKT") else "0",
