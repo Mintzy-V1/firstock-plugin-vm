@@ -326,13 +326,14 @@ class BrokerConnector:
             orderstatus = status.lower() or "open"
         symbol = self._ensure_eq(order.get("tradingSymbol") or order.get("tradingsymbol") or "")
         price = float(order.get("price") or 0)
+        avg_price = float(order.get("averagePrice") or order.get("averageprice") or price)
         side = order.get("transactionType") or order.get("transactiontype")
         return {
             "orderid": order.get("orderNumber") or order.get("ordernumber"),
             "tradingsymbol": symbol,
             "orderstatus": orderstatus,
-            "averageprice": price,
-            "filledshares": int(order.get("filledShares") or 0),
+            "averageprice": avg_price,
+            "filledshares": int(order.get("fillShares") or order.get("filledShares") or 0),
             "price": price,
             "producttype": (order.get("product") or "").upper(),
             "transactiontype": "BUY" if side in ("B", "BUY") else "SELL" if side in ("S", "SELL") else side,
