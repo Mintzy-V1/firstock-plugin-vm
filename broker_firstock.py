@@ -265,6 +265,8 @@ class BrokerConnector:
                     time.sleep(wait)
                     continue
                 raise
+            except Exception as e:
+                raise RuntimeError(f"API call failed: {e}")
 
     # ---- symbol / instrument lookup ----
     def get_symbol_token(self, tradingsymbol):
@@ -555,6 +557,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_order_book)
             data = [self._normalize_order_row(o) for o in (resp.get("data") or [])]
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -578,6 +582,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_positions)
             data = [self._normalize_position_row(p) for p in (resp.get("data") or [])]
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -588,6 +594,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_holdings)
             data = [self._normalize_holding_row(h) for h in (resp.get("data") or [])]
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -598,6 +606,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_trade_book)
             data = resp.get("data") or []
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -625,6 +635,8 @@ class BrokerConnector:
                     ltp = float(row.get("lastTradedPrice") or row.get("last_traded_price") or 0)
                     break
             return {"status": "success", "raw": {"status": True, "data": {"ltp": ltp}}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
