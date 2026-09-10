@@ -38,7 +38,7 @@ EXCHANGE_MAP = {
     "NCDEX": "NCDEX", "NCDEX_FO": "NCDEX",
 }
 ORDER_TYPE_MAP = {"MARKET": "MKT", "LIMIT": "LMT", "SL": "SL-LMT", "SL-MKT": "SL-MKT"}
-PRODUCT_TYPE_MAP = {"INTRADAY": "M", "CNC": "C", "DELIVERY": "C", "BTST": "C", "MTF": "I"}
+PRODUCT_TYPE_MAP = {"INTRADAY": "I", "CNC": "C", "DELIVERY": "C", "BTST": "C", "MTF": "I"}
 TERMINAL_STATUSES = {
     "REJECTED": "rejected", "CANCELED": "cancelled", "CANCELLED": "cancelled",
     "COMPLETE": "filled", "FILLED": "filled", "EXECUTED": "filled",
@@ -265,6 +265,8 @@ class BrokerConnector:
                     time.sleep(wait)
                     continue
                 raise
+            except Exception as e:
+                raise RuntimeError(f"API call failed: {e}")
 
     # ---- symbol / instrument lookup ----
     def get_symbol_token(self, tradingsymbol):
@@ -326,13 +328,14 @@ class BrokerConnector:
             orderstatus = status.lower() or "open"
         symbol = self._ensure_eq(order.get("tradingSymbol") or order.get("tradingsymbol") or "")
         price = float(order.get("price") or 0)
+        avg_price = float(order.get("averagePrice") or order.get("averageprice") or price)
         side = order.get("transactionType") or order.get("transactiontype")
         return {
             "orderid": order.get("orderNumber") or order.get("ordernumber"),
             "tradingsymbol": symbol,
             "orderstatus": orderstatus,
-            "averageprice": price,
-            "filledshares": int(order.get("filledShares") or 0),
+            "averageprice": avg_price,
+            "filledshares": int(order.get("fillShares") or order.get("filledShares") or 0),
             "price": price,
             "producttype": (order.get("product") or "").upper(),
             "transactiontype": "BUY" if side in ("B", "BUY") else "SELL" if side in ("S", "SELL") else side,
@@ -525,7 +528,7 @@ class BrokerConnector:
                 "orderNumber": order_id,
                 "exchange": current.get("exchange") or "NSE",
                 "retention": current.get("retention") or "DAY",
-                "product": current.get("product") or "M",
+                "product": current.get("product") or "I",
                 "priceType": price_type,
                 "tradingSymbol": current.get("tradingSymbol") or self._ensure_eq(kwargs.get("symbol") or ""),
                 "mkt_protection": "1" if price_type in ("MKT", "SL-MKT") else "0",
@@ -554,6 +557,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_order_book)
             data = [self._normalize_order_row(o) for o in (resp.get("data") or [])]
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -577,6 +582,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_positions)
             data = [self._normalize_position_row(p) for p in (resp.get("data") or [])]
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -587,6 +594,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_holdings)
             data = [self._normalize_holding_row(h) for h in (resp.get("data") or [])]
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -597,6 +606,8 @@ class BrokerConnector:
             resp = self._call_api(session["obj"].get_trade_book)
             data = resp.get("data") or []
             return {"status": "success", "raw": {"status": True, "data": data}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -624,6 +635,8 @@ class BrokerConnector:
                     ltp = float(row.get("lastTradedPrice") or row.get("last_traded_price") or 0)
                     break
             return {"status": "success", "raw": {"status": True, "data": {"ltp": ltp}}}
+        except RuntimeError:
+            raise
         except Exception as e:
             return {"status": "error", "error": str(e)}
 

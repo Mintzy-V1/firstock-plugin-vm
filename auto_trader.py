@@ -1503,6 +1503,7 @@ class AutoTrader:
             "cash_balance": round(self.cash_balance, 2),
             "realized_pnl": round(self.realized_pnl, 2),
             "unrealized_pnl": round(self.unrealized_pnl, 2),
+            "pnl": round(self.unrealized_pnl + self.realized_pnl, 2),
             "total_equity": round(
                 self.cash_balance + self.realized_pnl + self.unrealized_pnl, 2
             ),

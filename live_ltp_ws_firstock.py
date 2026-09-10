@@ -17,10 +17,12 @@ class FirstockLTPPoller:
         broker,
         on_tick: Callable[[str, float, float], None],
         poll_interval: float = 2.0,
+        market_client=None,
     ):
         self.broker = broker
         self.on_tick = on_tick
         self.poll_interval = poll_interval
+        self.market_client = market_client
         self._symbols: set = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -67,7 +69,8 @@ class FirstockLTPPoller:
                     prev = self._last_prices.get(sym)
                     if prev is None or abs(prev - price) > 1e-9:
                         self._last_prices[sym] = price
-                        self.on_tick(sym, price, now)
+                    # Re-emit even when unchanged so Redis live_pnl TTL stays fresh.
+                    self.on_tick(sym, price, now)
             except Exception as e:
                 print(f"[LTP-FIRSTOCK] poll error: {e}")
                 self._session = None
