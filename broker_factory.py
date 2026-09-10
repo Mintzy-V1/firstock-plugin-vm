@@ -117,6 +117,6 @@ def connect_broker(
         clear_broker_env(bt)
 
 
-def create_ltp_stream(broker, on_tick):
+def create_ltp_stream(broker, on_tick, market_client=None):
     from live_ltp_ws_firstock import FirstockLTPPoller
-    return FirstockLTPPoller(broker, on_tick)
+    return FirstockLTPPoller(broker, on_tick, market_client=market_client)
