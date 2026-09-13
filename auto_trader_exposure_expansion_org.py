@@ -21,6 +21,19 @@ import threading
 import logging
 import traceback
 from trading_snapshot import insert_trading_snapshot
+from utils.session_ledger import (
+    apply_fill_to_session_ledger,
+    record_engine_order_for_trader,
+)
+from utils.eod_exit import (
+    try_begin_eod_exit,
+    mark_eod_exit_done,
+    release_eod_exit_in_progress,
+    prepare_eod_exit_plan,
+    exit_plan_to_broker_positions,
+    finalize_eod_shutdown,
+)
+from utils.redis_keys import live_pnl_key, rms_exited_key, exit_status_key
 
 # ====================================================================
 from trading_state import trading_snapshot
@@ -553,6 +566,11 @@ class AutoTrader:
         self._auto_exit_lock = threading.Lock()
         self._auto_exit_thread = None
         self._shutdown_done = False
+        self._eod_exit_done = False
+        self._eod_exit_in_progress = False
+        self._eod_exit_lock = threading.Lock()
+        self._session_open_qty = {}
+        self._session_open_qty_lock = threading.Lock()
         self.positions_lock = threading.Lock()   #  ADD THIS LINE
         self._exited_symbols = set()  # Symbols manually exited Ã¢â‚¬â€ excluded from future cycles
         self._exited_symbols_index_ready = False
@@ -820,7 +838,7 @@ class AutoTrader:
                 "ts": time.time(),
             }
 
-            rc.setex(f"live_pnl:{sid}", 5, json.dumps(payload))
+            rc.setex(live_pnl_key(sid), 5, json.dumps(payload))
 
         except Exception as e:
             print(f"[LIVE-PNL] Redis push error: {e}")
@@ -1023,10 +1041,10 @@ class AutoTrader:
             if not sid or rc is None:
                 return
             rc.rpush(
-                f"autotrader:rms_exited:{sid}",
+                rms_exited_key(sid),
                 json.dumps({"symbol": symbol, "pnl": pnl, "ts": time.time()}),
             )
-            rc.expire(f"autotrader:rms_exited:{sid}", 86400)
+            rc.expire(rms_exited_key(sid), 86400)
             print(f"[RMS-TICKER] redis notify queued session={sid} symbol={symbol} pnl={float(pnl or 0.0):.2f}")
         except Exception as e:
             print(f"[RMS-TICKER] redis notify failed for {symbol}: {e}")
@@ -1502,7 +1520,7 @@ class AutoTrader:
                 "reason": reason,
                 "ts": time.time(),
             }
-            key = f"autotrader:exit_status:{sid}"
+            key = exit_status_key(sid)
             rc.setex(key, 86400, json.dumps(payload))
             print(f"[EOD] exit_status published to redis key={key} reason={reason}")
         except Exception as e:
@@ -1829,6 +1847,16 @@ class AutoTrader:
             print(f"[FILL PRICE ERROR] {symbol}: {e}")
             return 0.0   
     
+    def _track_engine_fill(self, symbol, broker_pos, ctx) -> None:
+        record_engine_order_for_trader(self, ctx.get("order_id"))
+        fill_qty = int(ctx.get("qty") or broker_pos.get("qty", 0) or 0)
+        apply_fill_to_session_ledger(
+            self,
+            symbol,
+            fill_qty,
+            ctx.get("action_type", ""),
+        )
+
     # ------- HANDLE FILLED -------- 
 
     def _handle_filled(self, symbol, broker_pos, ctx):
@@ -1874,6 +1902,7 @@ class AutoTrader:
                     },
                     ctx,
                 )
+                self._track_engine_fill(symbol, broker_pos, ctx)
                 if action_type in ("FLIP_TO_LONG", "FLIP_TO_SHORT"):
                     print(f"[FLIP] {symbol}: old position closed, opening new {'LONG' if 'LONG' in action_type else 'SHORT'} position @ {exit_price:.2f}")
                     with self.positions_lock:
@@ -1897,6 +1926,7 @@ class AutoTrader:
                     exit_qty,
                     pnl
                 )
+                self._track_engine_fill(symbol, broker_pos, ctx)
                 # FLIP: purani position close ho gayi, ab nayi side OPEN karni hai
                 if action_type in ("FLIP_TO_LONG", "FLIP_TO_SHORT"):
                     print(f"[FLIP] {symbol}: old position closed, opening new {'LONG' if 'LONG' in action_type else 'SHORT'} position @ {exit_price:.2f}")
@@ -1911,6 +1941,7 @@ class AutoTrader:
                 # Missing price/position for normal exit
                 print(f"[WARN] {symbol}: exit price nahi mili ya position exist nahi karti sirf pop kar rahe hain")
                 self.positions.pop(symbol, None)
+                self._track_engine_fill(symbol, broker_pos, ctx)
                 return
             elif action_type in ("FLIP_TO_LONG", "FLIP_TO_SHORT"):
                 # FLIP with no existing in-memory position = fresh entry of the new side
@@ -1980,6 +2011,7 @@ class AutoTrader:
             f"[POSITION SET] {symbol}: "
             f"{broker_pos['side']} {broker_pos['qty']} @ Ãƒâ€šÃ‚Â¹{entry_price:.2f}"
         )
+        self._track_engine_fill(symbol, broker_pos, ctx)
                
     # -------- HANDLE REJECTED ---------
 
@@ -2355,29 +2387,68 @@ class AutoTrader:
         # time.sleep(sleep_seconds)
 
     def _exit_all_positions_and_stop(self):
+        begin = try_begin_eod_exit(self)
+        if begin == "done":
+            return True
+        if begin == "busy":
+            return False
+
         try:
             angel_orders = fetch_todays_intraday_orders(self.broker, self.session)
             self._generate_final_merged_tradebook(angel_orders=angel_orders)
         except Exception as e:
             print(f"[EOD MERGE ERROR] {e}")
-        
+
+        try:
+            return self._run_eod_exit_body()
+        except Exception as e:
+            print(f"[EOD] Exit failed: {e}")
+            self.alerts.notify(f"EOD exit failed: {e}")
+            release_eod_exit_in_progress(self)
+            return False
+
+    def _run_eod_exit_body(self):
         print("\n" + "=" * 80)
-        print("  MARKET CLOSE APPROACHING - EXITING ALL POSITIONS")
+        print("  MARKET CLOSE (3:00 PM IST) - EXITING SESSION POSITIONS")
         print("=" * 80)
-        
-        self.alerts.notify("15:00 IST - Initiating exit of all positions")
-        
-        # Get current broker positions
+
+        self.alerts.notify("3:00 PM IST - Initiating exit of session positions")
+        self._notify_eod_exit_status_to_api(reason="MARKET_CLOSE_15:00_IST")
+
         with self.broker_pos_lock:
             self._broker_positions_cache = self._get_broker_positions()
-            broker_positions = list(self._broker_positions_cache or [])
-        
-        if not broker_positions:
-            print("[INFO]  No open positions to exit")
-            self.alerts.notify(" No open positions - Auto trader stopped")
-            return True
-        
-        print(f"[INFO] Found {len(broker_positions)} position(s) to exit")
+            raw_broker_positions = list(self._broker_positions_cache or [])
+
+        def _on_eod_skip_summary(count: int, sample: list, reason: str) -> None:
+            if reason == "ledger_fallback":
+                self.alerts.notify("EOD: using session ledger keys (Redis meta missing)")
+            elif reason == "ledger_zero" and count:
+                suffix = f" e.g. {', '.join(sample[:3])}" if sample else ""
+                self.alerts.notify(
+                    f"EOD skipped {count} manual qty on session symbol(s){suffix}"
+                )
+
+        exit_plan, mark_done_empty, status_msg = prepare_eod_exit_plan(
+            self,
+            raw_broker_positions,
+            fallback_symbols=list((self.symbol_allocations or {}).keys()),
+            on_skip_summary=_on_eod_skip_summary,
+        )
+
+        if not exit_plan:
+            if mark_done_empty:
+                print(f"[INFO]  {status_msg}")
+                self.alerts.notify(" No session positions to exit - Auto trader stopped")
+                finalize_eod_shutdown(self, sync_broker=True)
+                mark_eod_exit_done(self)
+                return True
+            print(f"[EOD] {status_msg}")
+            self.alerts.notify(status_msg)
+            release_eod_exit_in_progress(self)
+            return False
+
+        broker_positions = exit_plan_to_broker_positions(exit_plan)
+        print(f"[INFO] {status_msg}")
 
         eod_exit_records = {}
         for pos in broker_positions:
@@ -2447,7 +2518,8 @@ class AutoTrader:
                 
                 if result.success:
                     successful_exits += 1
-                    
+                    record_engine_order_for_trader(self, result.order_id)
+
                     # Add to pending for reconciliation
                     with self.pending_lock:
                         self.pending_orders[sym].append({
@@ -2501,9 +2573,8 @@ class AutoTrader:
         except Exception as e:
             print(f"[EOD-LOG] trading_logs insert failed: {e}")
         
-        # Clear internal positions
-        self.positions.clear()
-        
+        finalize_eod_shutdown(self, clear_positions=True, sync_broker=False)
+
         print("\n" + "=" * 80)
         print(" ALL POSITIONS EXITED - AUTO TRADER STOPPED")
         print("=" * 80)
@@ -2519,7 +2590,8 @@ class AutoTrader:
             f"Final Equity:{self.current_capital:,.2f}\n"
             f"Realized P&L:{self.realized_pnl:,.2f}"
         )
-        
+
+        mark_eod_exit_done(self)
         return True
 
     def exit_single_position(self, symbol: str, exit_reason: str = "MANUAL_EXIT", log_signal: str = None) -> dict:
