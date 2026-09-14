@@ -866,6 +866,11 @@ class AutoTrader:
 
             for p in data:
                 try:
+                    # Exit path must never square off CNC/DELIVERY/MIS/carry positions
+                    product = str(p.get("producttype") or p.get("productType") or "").upper()
+                    if product != "INTRADAY":
+                        continue
+
                     net_qty = int(p.get("netqty", 0))
                     if net_qty == 0:
                         continue
@@ -882,6 +887,7 @@ class AutoTrader:
                         "symbol": symbol,
                         "side": side,
                         "qty": abs(net_qty),
+                        "product_type": product or "INTRADAY",
                         "avg_price": float(
                             p.get("averageprice")
                             or p.get("avg_price")

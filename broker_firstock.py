@@ -304,6 +304,8 @@ class BrokerConnector:
         net_qty = int(pos.get("netQuantity") or pos.get("netqty") or 0)
         avg_price = float(pos.get("netAveragePrice") or pos.get("netavgprice") or 0)
         ltp = float(pos.get("lastTradedPrice") or pos.get("ltp") or 0)
+        raw_product = str(pos.get("product") or "").upper()
+        product_label = {"I": "INTRADAY", "C": "CNC", "M": "MTF"}.get(raw_product, raw_product)
         return {
             "tradingsymbol": symbol,
             "netqty": net_qty,
@@ -311,7 +313,7 @@ class BrokerConnector:
             "avgprice": avg_price,
             "ltp": ltp,
             "lastprice": ltp,
-            "producttype": pos.get("product", ""),
+            "producttype": product_label,
             "exchange": pos.get("exchange", ""),
             "code": str(pos.get("token") or ""),
         }

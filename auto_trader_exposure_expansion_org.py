@@ -1527,11 +1527,10 @@ class AutoTrader:
             print(f"[EOD] exit_status redis notify failed: {e}")
 
     def _trigger_market_close_exit(self, reason: str = "market_close_1500") -> bool:
-        """Idempotent 15:00 flatten. Safe from watchdog (sleep/active) and the main loop."""
+        """Idempotent 15:00 session square-off. Safe from watchdog (sleep/active) and the main loop."""
         with self._auto_exit_lock:
             if getattr(self, "_auto_exit_done", False):
                 return False
-            self._auto_exit_done = True
         print(f"[AUTO-EXIT] trigger reason={reason}")
         self.stop_event.set()
         try:
@@ -1539,29 +1538,33 @@ class AutoTrader:
         except Exception as e:
             print(f"[AUTO-EXIT] redis notify failed: {e}")
         try:
-            self._exit_all_positions_and_stop()
+            ok = self._exit_all_positions_and_stop()
         except Exception as e:
-            print(f"[AUTO-EXIT] flatten failed: {e}")
+            print(f"[AUTO-EXIT] session square-off failed: {e}")
             traceback.print_exc()
-        return True
+            ok = False
+        if ok:
+            with self._auto_exit_lock:
+                self._auto_exit_done = True
+        return bool(ok)
 
     def _auto_exit_watchdog_loop(self):
-        """Fires 15:00 IST flatten even if the main loop is asleep or mid-cycle."""
+        """Fires 15:00 IST session square-off even if the main loop is asleep or mid-cycle."""
         print("[AUTO-EXIT] watchdog started (15:00 IST, sleep or active cycle)")
         while not self.stop_event.is_set() and not getattr(self, "_auto_exit_done", False):
             now = self._now_market_time()
             t = now.time()
             if t >= AUTO_EXIT_WARNING_TIME and not self._exit_warning_sent:
                 self._exit_warning_sent = True
-                msg = "14:55 IST - flattening all positions at 15:00 IST (3:00 PM)."
+                msg = "14:55 IST - exiting session-operated positions at 15:00 IST (3:00 PM)."
                 print(f"\n{msg}")
                 try:
                     self.alerts.notify(msg)
                 except Exception:
                     pass
             if t >= AUTO_EXIT_TIME:
-                self._trigger_market_close_exit("watchdog_1500")
-                return
+                if self._trigger_market_close_exit("watchdog_1500"):
+                    return
             time.sleep(1)
 
     # ---------- TIME HELPERS ----------
@@ -1903,14 +1906,6 @@ class AutoTrader:
                     ctx,
                 )
                 self._track_engine_fill(symbol, broker_pos, ctx)
-                if action_type in ("FLIP_TO_LONG", "FLIP_TO_SHORT"):
-                    print(f"[FLIP] {symbol}: old position closed, opening new {'LONG' if 'LONG' in action_type else 'SHORT'} position @ {exit_price:.2f}")
-                    with self.positions_lock:
-                        self.positions[symbol] = {
-                            "side": "BUY" if "LONG" in action_type else "SELL",
-                            "qty": broker_pos.get("qty", 0),
-                            "entry_price": exit_price,
-                        }
                 return
 
             if exit_price > 0 and symbol in self.positions:
@@ -1927,38 +1922,12 @@ class AutoTrader:
                     pnl
                 )
                 self._track_engine_fill(symbol, broker_pos, ctx)
-                # FLIP: purani position close ho gayi, ab nayi side OPEN karni hai
-                if action_type in ("FLIP_TO_LONG", "FLIP_TO_SHORT"):
-                    print(f"[FLIP] {symbol}: old position closed, opening new {'LONG' if 'LONG' in action_type else 'SHORT'} position @ {exit_price:.2f}")
-                    with self.positions_lock:
-                        self.positions[symbol] = {
-                            "side": "BUY" if "LONG" in action_type else "SELL",
-                            "qty": broker_pos.get("qty", 0),
-                            "entry_price": exit_price,
-                        }
                 return
             elif action_type in ("EXIT_LONG", "COVER_SHORT", "STOP_LOSS", "MARKET_CLOSE_EXIT"):
                 # Missing price/position for normal exit
                 print(f"[WARN] {symbol}: exit price nahi mili ya position exist nahi karti sirf pop kar rahe hain")
                 self.positions.pop(symbol, None)
                 self._track_engine_fill(symbol, broker_pos, ctx)
-                return
-            elif action_type in ("FLIP_TO_LONG", "FLIP_TO_SHORT"):
-                # FLIP with no existing in-memory position = fresh entry of the new side
-                print(f"[FLIP] {symbol}: no existing position, treating as fresh {'LONG' if 'LONG' in action_type else 'SHORT'} entry @ {exit_price:.2f}")
-                if exit_price <= 0:
-                    order_id = ctx.get("order_id")
-                    if order_id:
-                        exit_price = self._get_fill_price_from_orderbook(order_id, symbol)
-                if exit_price <= 0:
-                    print(f"[WARN] {symbol}: flip entry price nahi mili, position set nahi hua")
-                    return
-                with self.positions_lock:
-                    self.positions[symbol] = {
-                        "side": "BUY" if "LONG" in action_type else "SELL",
-                        "qty": broker_pos.get("qty", 0),
-                        "entry_price": exit_price,
-                    }
                 return
 
             return
@@ -2152,6 +2121,11 @@ class AutoTrader:
 
             for p in data:
                 try:
+                    # Exit path must never square off CNC/DELIVERY/MIS/carry positions
+                    product = str(p.get("producttype") or p.get("productType") or "").upper()
+                    if product != "INTRADAY":
+                        continue
+
                     net_qty = int(p.get("netqty", 0))
                     if net_qty == 0:
                         continue
@@ -2168,6 +2142,7 @@ class AutoTrader:
                         "symbol": symbol,
                         "side": side,
                         "qty": abs(net_qty),
+                        "product_type": product or "INTRADAY",
                         "avg_price": float(
                             p.get("averageprice")
                             or p.get("avg_price")
@@ -3852,7 +3827,7 @@ class AutoTrader:
                     self._stoplock_done = True
 
                 if now.time() >= AUTO_EXIT_WARNING_TIME and not self._exit_warning_sent:
-                    msg = "14:55 IST - flattening all positions at 15:00 IST (3:00 PM)."
+                    msg = "14:55 IST - exiting session-operated positions at 15:00 IST (3:00 PM)."
                     print(f"\n{msg}")
                     self.alerts.notify(msg)
                     self._exit_warning_sent = True
