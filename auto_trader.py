@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import threading
 import logging
 from trading_snapshot import insert_trading_snapshot
+from utils.session_symbols import filter_broker_positions_for_session
 
 # ====================================================================
 
@@ -865,6 +866,11 @@ class AutoTrader:
 
             for p in data:
                 try:
+                    # Exit path must never square off CNC/DELIVERY/MIS/carry positions
+                    product = str(p.get("producttype") or p.get("productType") or "").upper()
+                    if product != "INTRADAY":
+                        continue
+
                     net_qty = int(p.get("netqty", 0))
                     if net_qty == 0:
                         continue
@@ -881,6 +887,7 @@ class AutoTrader:
                         "symbol": symbol,
                         "side": side,
                         "qty": abs(net_qty),
+                        "product_type": product or "INTRADAY",
                         "avg_price": float(
                             p.get("averageprice")
                             or p.get("avg_price")
@@ -1068,22 +1075,34 @@ class AutoTrader:
             print(f"[EOD MERGE ERROR] {e}")
         
         print("\n" + "=" * 80)
-        print("  MARKET CLOSE APPROACHING - EXITING ALL POSITIONS")
+        print("  MARKET CLOSE APPROACHING - EXITING SESSION POSITIONS")
         print("=" * 80)
         
-        self.alerts.notify(" 1:30 PM - Initiating exit of all positions")
+        self.alerts.notify(" 1:30 PM - Initiating exit of session positions")
         
         # Get current broker positions
         with self.broker_pos_lock:
             self._broker_positions_cache = self._get_broker_positions()
             broker_positions = list(self._broker_positions_cache or [])
+
+        session_id = getattr(self, "ui_session_id", None) or getattr(self, "session_id", None)
+        redis_client = getattr(self.market_client, "redis_client", None)
+        broker_positions = filter_broker_positions_for_session(
+            broker_positions,
+            session_id,
+            redis_client,
+            fallback_symbols=list((self.symbol_allocations or {}).keys()),
+            on_skip=lambda sym: self.alerts.notify(
+                f"EOD skip {sym} (not a session symbol)"
+            ),
+        )
         
         if not broker_positions:
-            print("[INFO]  No open positions to exit")
-            self.alerts.notify(" No open positions - Auto trader stopped")
+            print("[INFO]  No session positions to exit")
+            self.alerts.notify(" No session positions to exit - Auto trader stopped")
             return True
         
-        print(f"[INFO] Found {len(broker_positions)} position(s) to exit")
+        print(f"[INFO] Found {len(broker_positions)} session position(s) to exit")
         
         # Collect all exit orders
         exit_orders = []
