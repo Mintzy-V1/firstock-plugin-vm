@@ -248,7 +248,11 @@ class ParallelOrderExecutor:
         self.result_queue = Queue()
         self.workers = []
         self.stop_flag = threading.Event()
-    
+        # Only one caller may drain result_queue at a time. The main cycle and the
+        # RMS-exit thread both submit here; without this they steal each other's
+        # results and a symbol gets finalized with another symbol's fill price.
+        self._submit_lock = threading.Lock()
+
     def _worker(self):
         while not self.stop_flag.is_set():
             try:
@@ -394,28 +398,49 @@ class ParallelOrderExecutor:
     def submit_orders(self, orders: List[OrderRequest]) -> List[OrderResult]:
         if not self.workers:
             self.start()
-        
-        for order in orders:
-            self.order_queue.put(order)
-        
-        results = []
-        for i, order in enumerate(orders):        #  enumerate so we know which order
-            try:
-                result = self.result_queue.get(timeout=10)  #  reduced from 30s to 10s
-            except Exception:
-                print(f"[TIMEOUT] Order {i+1}/{len(orders)} timed out: "
-                    f"{order.symbol} {order.side} {order.qty}")
-                result = OrderResult(
-                    symbol=order.symbol,           #  now we know the symbol
+
+        # ponytail: serialize the whole submit/drain. Two concurrent callers
+        # (trading cycle + RMS exit thread) sharing one result_queue otherwise
+        # consume each other's results by position, so e.g. HCLTECH's exit gets
+        # TATASTEEL's fill price. Results are also matched by symbol, not order,
+        # because the worker threads finish out of submission order.
+        with self._submit_lock:
+            for order in orders:
+                self.order_queue.put(order)
+
+            results: List[OrderResult] = []
+            remaining = list(orders)
+            deadline = time.time() + 10.0
+            while remaining:
+                timeout = max(0.01, deadline - time.time())
+                try:
+                    result = self.result_queue.get(timeout=timeout)
+                except Exception:
+                    break
+                # Match the popped result to a still-pending order of the same
+                # symbol. Fall back to FIFO for unknown symbols (worker crash
+                # reports "UNKNOWN") so we never stall or pollute the queue.
+                match_idx = next(
+                    (i for i, o in enumerate(remaining)
+                     if getattr(result, "symbol", None) == o.symbol),
+                    0,
+                )
+                results.append(result)
+                remaining.pop(match_idx)
+
+            # Any order we never got a result for is reported as a timeout so the
+            # caller still gets one result per order (aligned by symbol).
+            for order in remaining:
+                print(f"[TIMEOUT] Order timed out: {order.symbol} {order.side} {order.qty}")
+                results.append(OrderResult(
+                    symbol=order.symbol,
                     success=False,
                     error="Order execution timeout",
-                    metadata=order.metadata        #  preserve metadata for pending_orders
-                )
-                
-            results.append(result)
-        
-        self.order_queue.join()
-        return results
+                    metadata=order.metadata,
+                ))
+
+            self.order_queue.join()
+            return results
     
 class OrderBatcher:    
     def __init__(self ,tlog=None):
@@ -4246,6 +4271,15 @@ class AutoTrader:
 
             result = results[0]
             metadata = result.metadata or {}
+
+            # Guard: never finalize this symbol with another symbol's fill.
+            if getattr(result, "symbol", None) != symbol:
+                msg = (
+                    f"Executor returned result for {getattr(result, 'symbol', None)} "
+                    f"while exiting {symbol} — discarding"
+                )
+                print(f"[SINGLE EXIT] {msg}")
+                return {"success": False, "symbol": symbol, "message": msg}
 
             if result.success:
                 exit_ctx = {
