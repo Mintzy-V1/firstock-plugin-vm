@@ -606,6 +606,25 @@ class AutoTrader:
 
         return 0.0
     
+    def _get_filled_qty_from_orderbook(self, order_id):
+        """Actual filledshares for a completed order, straight from the broker order book."""
+        try:
+            ob = self.broker.get_order_book(self.session)
+            if ob.get("status") != "success":
+                return 0
+
+            orders = ob.get("raw", {}).get("data", [])
+            if not isinstance(orders, list):
+                return 0
+
+            for order in orders:
+                if str(order.get("orderid")) != str(order_id):
+                    continue
+                return int(order.get("filledshares") or 0)
+        except Exception as e:
+            print(f"[FILLED QTY ERROR] order {order_id}: {e}")
+        return 0
+
     def _get_fill_price_from_orderbook(self, order_id, symbol):
         try:
             ob = self.broker.get_order_book(self.session)
@@ -1336,7 +1355,11 @@ class AutoTrader:
 
                     if pos:
                         # ---- FILLED (or partially filled) ----
-                        filled_qty = min(broker_qty, expected_qty)
+                        # ponytail: orderbook filledshares is ground truth for the
+                        # entry qty — the intended expected_qty drifts (100 vs 99/101).
+                        filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                        if filled_qty <= 0:
+                            filled_qty = min(broker_qty, expected_qty)
                         avg_price = float(pos.get("avg_price") or 0.0)
 
                         if avg_price <= 0 and order_id:
@@ -1388,11 +1411,16 @@ class AutoTrader:
                                 if exit_price > 0:
                                     print(f"[WARN] {sym}: exit price order book se nahi mili, LTP use kar rahe hain â‚¹{exit_price:.2f}")
 
+                            # ponytail: size exit close on what actually traded, not the intended qty
+                            exit_filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                            if exit_filled_qty <= 0:
+                                exit_filled_qty = expected_qty
+
                             self._handle_filled(
                                 sym,
                                 {
                                     "side": expected_side,
-                                    "qty": expected_qty,
+                                    "qty": exit_filled_qty,
                                     "avg_price": None  # price already realized
                                 },
                                 ctx
