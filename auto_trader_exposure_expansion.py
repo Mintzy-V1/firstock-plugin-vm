@@ -248,7 +248,11 @@ class ParallelOrderExecutor:
         self.result_queue = Queue()
         self.workers = []
         self.stop_flag = threading.Event()
-    
+        # Only one caller may drain result_queue at a time. The main cycle and the
+        # RMS-exit thread both submit here; without this they steal each other's
+        # results and a symbol gets finalized with another symbol's fill price.
+        self._submit_lock = threading.Lock()
+
     def _worker(self):
         while not self.stop_flag.is_set():
             try:
@@ -394,28 +398,49 @@ class ParallelOrderExecutor:
     def submit_orders(self, orders: List[OrderRequest]) -> List[OrderResult]:
         if not self.workers:
             self.start()
-        
-        for order in orders:
-            self.order_queue.put(order)
-        
-        results = []
-        for i, order in enumerate(orders):        #  enumerate so we know which order
-            try:
-                result = self.result_queue.get(timeout=10)  #  reduced from 30s to 10s
-            except Exception:
-                print(f"[TIMEOUT] Order {i+1}/{len(orders)} timed out: "
-                    f"{order.symbol} {order.side} {order.qty}")
-                result = OrderResult(
-                    symbol=order.symbol,           #  now we know the symbol
+
+        # ponytail: serialize the whole submit/drain. Two concurrent callers
+        # (trading cycle + RMS exit thread) sharing one result_queue otherwise
+        # consume each other's results by position, so e.g. HCLTECH's exit gets
+        # TATASTEEL's fill price. Results are also matched by symbol, not order,
+        # because the worker threads finish out of submission order.
+        with self._submit_lock:
+            for order in orders:
+                self.order_queue.put(order)
+
+            results: List[OrderResult] = []
+            remaining = list(orders)
+            deadline = time.time() + 10.0
+            while remaining:
+                timeout = max(0.01, deadline - time.time())
+                try:
+                    result = self.result_queue.get(timeout=timeout)
+                except Exception:
+                    break
+                # Match the popped result to a still-pending order of the same
+                # symbol. Fall back to FIFO for unknown symbols (worker crash
+                # reports "UNKNOWN") so we never stall or pollute the queue.
+                match_idx = next(
+                    (i for i, o in enumerate(remaining)
+                     if getattr(result, "symbol", None) == o.symbol),
+                    0,
+                )
+                results.append(result)
+                remaining.pop(match_idx)
+
+            # Any order we never got a result for is reported as a timeout so the
+            # caller still gets one result per order (aligned by symbol).
+            for order in remaining:
+                print(f"[TIMEOUT] Order timed out: {order.symbol} {order.side} {order.qty}")
+                results.append(OrderResult(
+                    symbol=order.symbol,
                     success=False,
                     error="Order execution timeout",
-                    metadata=order.metadata        #  preserve metadata for pending_orders
-                )
-                
-            results.append(result)
-        
-        self.order_queue.join()
-        return results
+                    metadata=order.metadata,
+                ))
+
+            self.order_queue.join()
+            return results
     
 class OrderBatcher:    
     def __init__(self ,tlog=None):
@@ -1917,16 +1942,61 @@ class AutoTrader:
         except Exception as e:
             print(f"[FILL PRICE ERROR] {symbol}: {e}")
             return 0.0   
-    
+
+    def _get_filled_qty_from_orderbook(self, order_id):
+        """Actual filledshares for a completed order, straight from the broker order book."""
+        try:
+            ob = self.broker.get_order_book(self.session)
+            if ob.get("status") != "success":
+                return 0
+
+            orders = ob.get("raw", {}).get("data", [])
+            if not isinstance(orders, list):
+                return 0
+
+            for order in orders:
+                if str(order.get("orderid")) != str(order_id):
+                    continue
+                return int(order.get("filledshares") or 0)
+        except Exception as e:
+            print(f"[FILLED QTY ERROR] order {order_id}: {e}")
+        return 0
+
     def _track_engine_fill(self, symbol, broker_pos, ctx) -> None:
         record_engine_order_for_trader(self, ctx.get("order_id"))
-        fill_qty = int(ctx.get("qty") or broker_pos.get("qty", 0) or 0)
+
+        # ponytail: order book is the source of truth for quantity — the intended
+        # ctx qty can drift from the actual fill (e.g. capital/LTP -> 100, market fills 99/101).
+        fill_qty = 0
+        order_id = ctx.get("order_id")
+        if order_id:
+            fill_qty = self._get_filled_qty_from_orderbook(order_id)
+        if fill_qty <= 0:
+            fill_qty = int(broker_pos.get("qty", 0) or 0)
+        if fill_qty <= 0:
+            fill_qty = int(ctx.get("qty") or 0)
+
         apply_fill_to_session_ledger(
             self,
             symbol,
             fill_qty,
             ctx.get("action_type", ""),
+            side=ctx.get("side") or broker_pos.get("side") or "",
         )
+
+    def _ledger_exit_qty(self, symbol, broker_qty):
+        """Own-position exit qty: min(|own ledger|, broker qty).
+        Falls back to broker qty when the ledger is empty (paper mode / feature disabled)."""
+        broker_qty = int(broker_qty or 0)
+        own = 0
+        try:
+            with self._session_open_qty_lock:
+                own = abs(int(self._session_open_qty.get(symbol, 0) or 0))
+        except Exception:
+            own = 0
+        if own <= 0:
+            return broker_qty
+        return min(own, broker_qty)
 
     # ------- HANDLE FILLED -------- 
 
@@ -4209,7 +4279,7 @@ class AutoTrader:
                 return {"success": False, "symbol": symbol, "message": msg}
 
             side = target_pos["side"]
-            qty = target_pos["qty"]
+            qty = self._ledger_exit_qty(symbol, target_pos["qty"])
             curr_price = target_pos.get("ltp", 0.0)
             exit_side = "SELL" if side == "BUY" else "BUY"
             pre_exit_position = self._snapshot_position_for_exit(symbol, target_pos)
@@ -4245,6 +4315,15 @@ class AutoTrader:
 
             result = results[0]
             metadata = result.metadata or {}
+
+            # Guard: never finalize this symbol with another symbol's fill.
+            if getattr(result, "symbol", None) != symbol:
+                msg = (
+                    f"Executor returned result for {getattr(result, 'symbol', None)} "
+                    f"while exiting {symbol} — discarding"
+                )
+                print(f"[SINGLE EXIT] {msg}")
+                return {"success": False, "symbol": symbol, "message": msg}
 
             if result.success:
                 exit_ctx = {
@@ -4382,11 +4461,15 @@ class AutoTrader:
                             continue
                             
                         # If executed, definitively call handle_filled
+                        # ponytail: size flip on the actual fill, not the intended 2x qty
+                        flip_filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                        if flip_filled_qty <= 0:
+                            flip_filled_qty = expected_qty
                         self._handle_filled(
                             sym,
                             {
                                 "side": "BUY" if "LONG" in action_type else "SELL",
-                                "qty": expected_qty,
+                                "qty": flip_filled_qty,
                                 "avg_price": exit_price,
                             },
                             ctx,
@@ -4422,7 +4505,11 @@ class AutoTrader:
 
                     if pos:
                         # ---- FILLED (or partially filled) ----
-                        filled_qty = min(broker_qty, expected_qty)
+                        # ponytail: orderbook filledshares is ground truth for the
+                        # entry qty — the intended expected_qty drifts (100 vs 99/101).
+                        filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                        if filled_qty <= 0:
+                            filled_qty = min(broker_qty, expected_qty)
                         avg_price = float(pos.get("avg_price") or 0.0)
 
                         if avg_price <= 0 and order_id:
@@ -4477,11 +4564,16 @@ class AutoTrader:
                                 print(f"[DEBUG-RECONCILE] Order {order_id} not executed yet. Retaining in pending list.")
                                 continue
 
+                            # ponytail: size exit close on what actually traded, not the intended qty
+                            exit_filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                            if exit_filled_qty <= 0:
+                                exit_filled_qty = expected_qty
+
                             self._handle_filled(
                                 sym,
                                 {
                                     "side": expected_side,
-                                    "qty": expected_qty,
+                                    "qty": exit_filled_qty,
                                     "avg_price": exit_price  # price already realized
                                 },
                                 ctx
@@ -5662,7 +5754,7 @@ class AutoTrader:
                             sl_pct = self.symbol_allocations[sym].get("stop_loss")
                             if sl_pct is not None and sl_pct > 0:
                                 entry_price = broker_pos["avg_price"]
-                                qty = broker_pos["qty"]
+                                qty = self._ledger_exit_qty(sym, broker_pos["qty"])
                                 position_side = broker_pos["side"]
                                 if entry_price <= 0 or qty <= 0 or not position_side:
                                     continue
@@ -5891,7 +5983,7 @@ class AutoTrader:
                         # SCENARIO 3: EXIT LONG & REVERSE TO SHORT
                         if sig == "SELL" and has_broker_pos and broker_pos["side"] == "BUY" and sym not in self.pending_orders:
                             scenario_name = "SELL (Flip Long to Short)"
-                            qty = broker_pos["qty"]
+                            qty = self._ledger_exit_qty(sym, broker_pos["qty"])
                             inverted_qty = qty*2                 # EXIT LONG -> OPEN SHORT (same qty)
                             print(f"[ORDER QUEUED] {sym} {sig} qty={qty}")
 
@@ -5917,7 +6009,7 @@ class AutoTrader:
                         # SCENARIO 4: EXIT SHORT & REVERSE TO LONG
                         if sig == "BUY" and has_broker_pos and broker_pos["side"] == "SELL" and sym not in self.pending_orders:
                             scenario_name = "BUY (Flip Short to Long)"
-                            qty = broker_pos["qty"]
+                            qty = self._ledger_exit_qty(sym, broker_pos["qty"])
                             inverted_qty = qty*2                # EXIT SHORT -> OPEN LONG (same qty)
                             print(f"[ORDER QUEUED] {sym} {sig} qty={qty}")
                     

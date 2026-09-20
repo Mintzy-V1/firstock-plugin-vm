@@ -1503,6 +1503,7 @@ class AutoTrader:
             f"realized={exit_doc.get('realized_pnl')} unrealized={exit_doc.get('unrealized_pnl')} "
             f"trading_log_cycle={exit_doc.get('display_cycle')}"
         )
+        self._track_engine_fill(symbol, broker_pos, ctx)
         return exit_doc
 
     def _notify_eod_exit_status_to_api(self, reason: str = "MARKET_CLOSE_15:00_IST") -> None:
@@ -1850,15 +1851,60 @@ class AutoTrader:
             print(f"[FILL PRICE ERROR] {symbol}: {e}")
             return 0.0   
     
+    def _get_filled_qty_from_orderbook(self, order_id):
+        """Actual filledshares for a completed order, straight from the broker order book."""
+        try:
+            ob = self.broker.get_order_book(self.session)
+            if ob.get("status") != "success":
+                return 0
+
+            orders = ob.get("raw", {}).get("data", [])
+            if not isinstance(orders, list):
+                return 0
+
+            for order in orders:
+                if str(order.get("orderid")) != str(order_id):
+                    continue
+                return int(order.get("filledshares") or 0)
+        except Exception as e:
+            print(f"[FILLED QTY ERROR] order {order_id}: {e}")
+        return 0
+
     def _track_engine_fill(self, symbol, broker_pos, ctx) -> None:
         record_engine_order_for_trader(self, ctx.get("order_id"))
-        fill_qty = int(ctx.get("qty") or broker_pos.get("qty", 0) or 0)
+
+        # ponytail: order book is the source of truth for quantity — the intended
+        # ctx qty can drift from the actual fill (e.g. capital/LTP -> 100, market fills 99/101).
+        fill_qty = 0
+        order_id = ctx.get("order_id")
+        if order_id:
+            fill_qty = self._get_filled_qty_from_orderbook(order_id)
+        if fill_qty <= 0:
+            fill_qty = int(broker_pos.get("qty", 0) or 0)
+        if fill_qty <= 0:
+            fill_qty = int(ctx.get("qty") or 0)
+
         apply_fill_to_session_ledger(
             self,
             symbol,
             fill_qty,
             ctx.get("action_type", ""),
+            side=ctx.get("side") or broker_pos.get("side") or "",
         )
+
+    def _ledger_exit_qty(self, symbol, broker_qty):
+        """Own-position exit qty: min(|own ledger|, broker qty).
+        Falls back to broker qty when the ledger is empty (paper mode / feature disabled)."""
+        broker_qty = int(broker_qty or 0)
+        own = 0
+        try:
+            with self._session_open_qty_lock:
+                own = abs(int(self._session_open_qty.get(symbol, 0) or 0))
+        except Exception:
+            own = 0
+        if own <= 0:
+            return broker_qty
+        return min(own, broker_qty)
 
     # ------- HANDLE FILLED -------- 
 
@@ -1905,7 +1951,6 @@ class AutoTrader:
                     },
                     ctx,
                 )
-                self._track_engine_fill(symbol, broker_pos, ctx)
                 return
 
             if exit_price > 0 and symbol in self.positions:
@@ -2586,12 +2631,38 @@ class AutoTrader:
                 self._broker_positions_cache = self._get_broker_positions()
                 broker_positions = list(self._broker_positions_cache or [])
 
-            # 2) Find the target symbol
+            # 2) Find the target symbol (normalize; engine book if Angel list lags)
             target_pos = None
             for pos in broker_positions:
-                if pos["symbol"] == symbol:
+                if self._normalize_config_symbol(pos.get("symbol")) == symbol:
                     target_pos = pos
                     break
+
+            if not target_pos:
+                with self.positions_lock:
+                    internal = dict(self.positions.get(symbol) or {})
+                qty_int = int(internal.get("qty") or 0)
+                side_int = internal.get("side")
+                if qty_int > 0 and side_int in ("BUY", "SELL"):
+                    ltp = 0.0
+                    with self.live_pnl_lock:
+                        tick = (self.live_pnl or {}).get(symbol) or {}
+                        ltp = float(tick.get("ltp") or 0.0)
+                    if ltp <= 0:
+                        ltp = float((getattr(self, "_cycle_ltp_cache", {}) or {}).get(symbol) or 0.0)
+                    if ltp <= 0:
+                        ltp = float(internal.get("entry_price") or 0.0)
+                    target_pos = {
+                        "symbol": symbol,
+                        "side": side_int,
+                        "qty": qty_int,
+                        "ltp": ltp,
+                        "avg_price": float(internal.get("entry_price") or 0.0),
+                    }
+                    print(
+                        f"[SINGLE EXIT] {symbol}: broker list miss — using engine "
+                        f"{side_int} {qty_int}"
+                    )
 
             if not target_pos:
                 msg = f"No open position found for {symbol}"
@@ -2599,7 +2670,7 @@ class AutoTrader:
                 return {"success": False, "symbol": symbol, "message": msg}
 
             side = target_pos["side"]
-            qty = target_pos["qty"]
+            qty = self._ledger_exit_qty(symbol, target_pos["qty"])
             curr_price = target_pos.get("ltp", 0.0)
             exit_side = "SELL" if side == "BUY" else "BUY"
             pre_exit_position = self._snapshot_position_for_exit(symbol, target_pos)
@@ -2659,6 +2730,7 @@ class AutoTrader:
                         },
                         exit_ctx,
                     )
+                    self._exited_symbols.add(symbol)
                     msg = f"Exit order filled for {symbol} (closed {side} position, qty={qty})"
                     print(f"[SINGLE EXIT] {msg}")
                     return {"success": True, "symbol": symbol, "message": msg, "order_id": result.order_id}
@@ -2802,11 +2874,15 @@ class AutoTrader:
                             continue
                             
                         # If executed, definitively call handle_filled
+                        # ponytail: size flip on the actual fill, not the intended 2x qty
+                        flip_filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                        if flip_filled_qty <= 0:
+                            flip_filled_qty = expected_qty
                         self._handle_filled(
                             sym,
                             {
                                 "side": "BUY" if "LONG" in action_type else "SELL",
-                                "qty": expected_qty,
+                                "qty": flip_filled_qty,
                                 "avg_price": exit_price,
                             },
                             ctx,
@@ -2842,7 +2918,11 @@ class AutoTrader:
 
                     if pos:
                         # ---- FILLED (or partially filled) ----
-                        filled_qty = min(broker_qty, expected_qty)
+                        # ponytail: orderbook filledshares is ground truth for the
+                        # entry qty — the intended expected_qty drifts (100 vs 99/101).
+                        filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                        if filled_qty <= 0:
+                            filled_qty = min(broker_qty, expected_qty)
                         avg_price = float(pos.get("avg_price") or 0.0)
 
                         if avg_price <= 0 and order_id:
@@ -2897,11 +2977,16 @@ class AutoTrader:
                                 print(f"[DEBUG-RECONCILE] Order {order_id} not executed yet. Retaining in pending list.")
                                 continue
 
+                            # ponytail: size exit close on what actually traded, not the intended qty
+                            exit_filled_qty = self._get_filled_qty_from_orderbook(order_id) if order_id else 0
+                            if exit_filled_qty <= 0:
+                                exit_filled_qty = expected_qty
+
                             self._handle_filled(
                                 sym,
                                 {
                                     "side": expected_side,
-                                    "qty": expected_qty,
+                                    "qty": exit_filled_qty,
                                     "avg_price": exit_price  # price already realized
                                 },
                                 ctx
@@ -3345,6 +3430,24 @@ class AutoTrader:
     @staticmethod
     def _normalize_config_symbol(symbol: str) -> str:
         return (symbol or "").upper().replace("-EQ", "").strip()
+
+    def _strip_exited_from_active(self, symbols: list, batch_size: int):
+        """Drop stop-lock / manual exits from this loop's symbol list. No I/O wait."""
+        self._sync_exited_symbols_from_db()
+        if not self._exited_symbols:
+            return symbols, [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+        before_count = len(symbols)
+        symbols = [
+            s for s in symbols
+            if self._normalize_config_symbol(s) not in self._exited_symbols
+        ]
+        symbol_batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+        if len(symbols) < before_count:
+            print(
+                f"[SINGLE EXIT] Removed {sorted(self._exited_symbols)} from active symbols. "
+                f"Remaining: {symbols}"
+            )
+        return symbols, symbol_batches
 
     def _get_symbol_position_qty(self, symbol: str) -> int:
         symbol = self._normalize_config_symbol(symbol)
@@ -3796,20 +3899,7 @@ class AutoTrader:
                     break    
 
                 # ==================== FILTER EXITED SYMBOLS ====================
-                # If any symbols were manually exited, remove them from the active list
-                self._sync_exited_symbols_from_db()
-                if self._exited_symbols:
-                    before_count = len(symbols)
-                    symbols = [
-                        s for s in symbols
-                        if self._normalize_config_symbol(s) not in self._exited_symbols
-                    ]
-                    symbol_batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
-                    removed = self._exited_symbols.copy()
-                    # Don't clear _exited_symbols Ã¢â‚¬â€ keep them excluded permanently
-                    if len(symbols) < before_count:
-                        print(f"[SINGLE EXIT] Removed {removed} from active symbols. Remaining: {symbols}")
-                
+                symbols, symbol_batches = self._strip_exited_from_active(symbols, batch_size)
                 if not symbols:
                     print("[AUTO_TRADER] All symbols have been exited Ã¢â‚¬â€ no more symbols to trade. Stopping.")
                     self.stop_event.set()
@@ -3825,6 +3915,12 @@ class AutoTrader:
                 if not self._stoplock_done and now.time() >= STOP_LOCK_TIME:
                     self._run_stoplock_exits(symbols)
                     self._stoplock_done = True
+                    # Same 14:16 wake — drop losers before this candle's prediction.
+                    symbols, symbol_batches = self._strip_exited_from_active(symbols, batch_size)
+                    if not symbols:
+                        print("[AUTO_TRADER] All symbols exited at stop-lock — stopping.")
+                        self.stop_event.set()
+                        break
 
                 if now.time() >= AUTO_EXIT_WARNING_TIME and not self._exit_warning_sent:
                     msg = "14:55 IST - exiting session-operated positions at 15:00 IST (3:00 PM)."
@@ -4108,7 +4204,11 @@ class AutoTrader:
                 for sym, info in signals.items():
                     t_sym_loop = time.time()
                     symbol_action_taken = False
-                    try:   
+                    try:
+                        if self._normalize_config_symbol(sym) in self._exited_symbols:
+                            print(f"[SKIP] {sym}: stop-lock/exited — no new order this candle")
+                            continue
+
                         has_broker_pos = False
                         broker_pos = None
                         
@@ -4165,7 +4265,7 @@ class AutoTrader:
                             sl_pct = self.symbol_allocations[sym].get("stop_loss")
                             if sl_pct is not None and sl_pct > 0:
                                 entry_price = broker_pos["avg_price"]
-                                qty = broker_pos["qty"]
+                                qty = self._ledger_exit_qty(sym, broker_pos["qty"])
                                 position_side = broker_pos["side"]
                                 if entry_price <= 0 or qty <= 0 or not position_side:
                                     continue
@@ -4394,7 +4494,7 @@ class AutoTrader:
                         # SCENARIO 3: EXIT LONG & REVERSE TO SHORT
                         if sig == "SELL" and has_broker_pos and broker_pos["side"] == "BUY" and sym not in self.pending_orders:
                             scenario_name = "SELL (Flip Long to Short)"
-                            qty = broker_pos["qty"]
+                            qty = self._ledger_exit_qty(sym, broker_pos["qty"])
                             inverted_qty = qty*2                 # EXIT LONG -> OPEN SHORT (same qty)
                             print(f"[ORDER QUEUED] {sym} {sig} qty={qty}")
 
@@ -4420,7 +4520,7 @@ class AutoTrader:
                         # SCENARIO 4: EXIT SHORT & REVERSE TO LONG
                         if sig == "BUY" and has_broker_pos and broker_pos["side"] == "SELL" and sym not in self.pending_orders:
                             scenario_name = "BUY (Flip Short to Long)"
-                            qty = broker_pos["qty"]
+                            qty = self._ledger_exit_qty(sym, broker_pos["qty"])
                             inverted_qty = qty*2                # EXIT SHORT -> OPEN LONG (same qty)
                             print(f"[ORDER QUEUED] {sym} {sig} qty={qty}")
                     
