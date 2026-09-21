@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax check
+        run: |
+          python3 -c "
+          import ast
+          for f in ['auto_trader.py','auto_trader_exposure_expansion.py','auto_trader_exposure_expansion_org.py','api_server.py','broker_firstock.py','session_manager.py']:
+              ast.parse(open(f).read())
+          print('ALL OK')
+          "
