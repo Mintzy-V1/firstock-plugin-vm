@@ -1,0 +1,37 @@
+name: Deploy to VM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vm
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tarball
+        run: |
+          tar --exclude='__pycache__' --exclude='.DS_Store' --exclude='.git' \
+              --exclude='logs' --exclude='error.log' --exclude='*.csv' --exclude='*.env' \
+              --no-xattrs -czf /tmp/trader_hub_vm_repo.tar.gz .
+          sha256sum /tmp/trader_hub_vm_repo.tar.gz | awk '{print $1}' > /tmp/trader_hub_vm_repo.tar.gz.sha256
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload tarball + version marker to S3
+        run: |
+          aws s3 cp /tmp/trader_hub_vm_repo.tar.gz s3://firststock-mintzy-vm/trader_hub_vm_repo.tar.gz
+          echo "${{ github.sha }}" > /tmp/deploy_version
+          aws s3 cp /tmp/deploy_version s3://firststock-mintzy-vm/deploy_version
+          echo "Deploy marker: ${{ github.sha }}"
