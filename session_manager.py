@@ -1079,10 +1079,7 @@ class SessionManager:
 
     @classmethod
     def _mongo_settings(cls):
-        mongo_uri = os.environ.get(
-            "MONGO_URI",
-            "mongodb+srv://mintzy01ai_db_user:zTqQRkovgKbLXQdp@cluster0.cztcxpr.mongodb.net/?appName=Cluster0",
-        )
+        mongo_uri = os.environ.get("MONGO_URI", "")
         mongo_db_name = os.environ.get("MONGO_DB_NAME", "mintzy_plugin")
         return mongo_uri, mongo_db_name
 
@@ -1268,10 +1265,7 @@ class SessionManager:
         broker_config["free_cash"] = session_doc.get("free_cash")
         
         # Get MongoDB connection details
-        mongo_uri = os.environ.get(
-            "MONGO_URI",
-            "mongodb+srv://mintzy01ai_db_user:zTqQRkovgKbLXQdp@cluster0.cztcxpr.mongodb.net/?appName=Cluster0"
-        )
+        mongo_uri = os.environ.get("MONGO_URI", "")
         mongo_db_name = os.environ.get("MONGO_DB_NAME", "mintzy_plugin")
         mongo_config_db_name = os.environ.get("MONGO_CONFIG_DB_NAME") or "test"
         

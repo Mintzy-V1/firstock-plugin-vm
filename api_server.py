@@ -130,10 +130,7 @@ LOGS_DIR = resolve_logs_dir()
 
 logger = logging.getLogger(__name__)
 
-MONGO_URI = os.environ.get(
-    "MONGO_URI",
-"mongodb+srv://mintzy01ai_db_user:zTqQRkovgKbLXQdp@cluster0.cztcxpr.mongodb.net/?appName=Cluster0"
-).strip();
+MONGO_URI = os.environ.get("MONGO_URI", "").strip();
 
 
 # MONGO_URI = os.environ.get(REMOTE_DASHBOARD_BASE)

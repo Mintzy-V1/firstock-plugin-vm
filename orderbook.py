@@ -10,14 +10,17 @@ MARKET_TZ = timezone(timedelta(hours=5, minutes=30))
 DB_NAME = "autotrader"
 COLLECTION_NAME = "order_history"
 
-MONGO_URI = os.environ.get(
-    "MONGO_URI",
-    "mongodb+srv://ankitarrow:ankitarrow@cluster0.zcajdur.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-).strip()
+MONGO_URI = os.environ.get("MONGO_URI", "").strip()
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[DB_NAME]
-orders_col = db[COLLECTION_NAME]
+try:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client[DB_NAME]
+    orders_col = db[COLLECTION_NAME]
+except Exception as e:
+    print(f"[WARN] orderbook Mongo unavailable ({e})")
+    mongo_client = None
+    db = None
+    orders_col = None
 
 
 def _parse_order_time(raw_time):
