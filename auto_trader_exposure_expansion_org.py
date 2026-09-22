@@ -103,9 +103,9 @@ AUTO_EXIT_TIME = dt_time(15, 0)          # 3:00 PM IST
 AUTO_EXIT_WARNING_TIME = dt_time(14, 55) # 5 min before flatten
 STOP_LOCK_TIME = dt_time(14, 15)         # 14:15 IST — exit losers, continue with greens
 
-# TEMP TEST: when set, trading uses this cash cap instead of full broker RMS.
-# Default 30000 for sim→live testing. Set env PYRAMID_FREE_CASH_OVERRIDE=none to use real RMS again.
-_raw_pyramid_cash_override = os.environ.get("PYRAMID_FREE_CASH_OVERRIDE", "30000")
+# ponytail: cash cap disabled by default — full broker capital is used in trades.
+# Set env PYRAMID_FREE_CASH_OVERRIDE=<number> to re-enable a fixed cap.
+_raw_pyramid_cash_override = os.environ.get("PYRAMID_FREE_CASH_OVERRIDE", "none")
 if str(_raw_pyramid_cash_override).strip().lower() in ("", "none", "null"):
     PYRAMID_FREE_CASH_OVERRIDE = None
 else:

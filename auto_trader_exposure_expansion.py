@@ -56,9 +56,9 @@ PYR_MULTS = [1.40, 1.30, 1.20, 1.00, 1.00, 0.75, 0.75, 0.75, 0.75, 0.75]
 # Nifty intraday leverage: use 4x of account free cash for pyramid allocation headroom
 PYRAMID_LEVERAGE_MULTIPLIER = float(os.environ.get("PYRAMID_LEVERAGE_MULTIPLIER", "1"))
 
-# TEMP TEST: when set, trading + pyramid use this cash instead of live RMS (avoids deploying full broker cash).
-# Default 30000 for sim→live testing. Set env PYRAMID_FREE_CASH_OVERRIDE=none to use real RMS again.
-_raw_pyramid_cash_override = os.environ.get("PYRAMID_FREE_CASH_OVERRIDE", "30000")
+# ponytail: cash cap disabled by default — full broker capital is used in trades.
+# Set env PYRAMID_FREE_CASH_OVERRIDE=<number> to re-enable a fixed cap.
+_raw_pyramid_cash_override = os.environ.get("PYRAMID_FREE_CASH_OVERRIDE", "none")
 if str(_raw_pyramid_cash_override).strip().lower() in ("", "none", "null"):
     PYRAMID_FREE_CASH_OVERRIDE = None
 else:
