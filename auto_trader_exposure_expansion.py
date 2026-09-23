@@ -3101,7 +3101,7 @@ class AutoTrader:
         return None
 
     def _get_pyramid_free_cash(self) -> Optional[float]:
-        """Pyramid free cash: test override first — never live 97L RMS/session during test."""
+        """Pyramid free cash: override first; else real broker RMS cash (full capital)."""
         override = PYRAMID_FREE_CASH_OVERRIDE
         if override is not None:
             try:
@@ -3115,24 +3115,25 @@ class AutoTrader:
             except (TypeError, ValueError):
                 print(f"[PYRAMID] invalid PYRAMID_FREE_CASH_OVERRIDE={override!r} — ignoring")
 
-        
-        # broker_cash = self._fetch_broker_free_cash(context="PYRAMID")
-        # if broker_cash is not None:
-        #     return broker_cash
-        #
-        # session_free = getattr(self, "session_free_cash", None)
-        # if session_free is not None:
-        #     try:
-        #         parsed = float(session_free)
-        #         if parsed >= 0:
-        #             print(f"[PYRAMID] using session_free_cash fallback: {parsed:,.2f}")
-        #             return parsed
-        #     except (TypeError, ValueError):
-        #         pass
+        # ponytail: no override -> use real broker free cash so the sim->live handoff
+        # works on full capital (no 30k cap).
+        broker_cash = self._fetch_broker_free_cash(context="PYRAMID")
+        if broker_cash is not None:
+            return broker_cash
+
+        session_free = getattr(self, "session_free_cash", None)
+        if session_free is not None:
+            try:
+                parsed = float(session_free)
+                if parsed >= 0:
+                    print(f"[PYRAMID] using session_free_cash fallback: {parsed:,.2f}")
+                    return parsed
+            except (TypeError, ValueError):
+                pass
 
         print(
-            "[PYRAMID] ABORT — test override unavailable and RMS/session fallbacks disabled "
-            "(refusing real ~97L cash for pyramid sizing)"
+            "[PYRAMID] ABORT — no override and broker/session cash unavailable "
+            "(cannot size pyramid for live handoff)"
         )
         return None
 
@@ -6623,7 +6624,15 @@ class AutoTrader:
         else:
             print("[SHUTDOWN] Pehle open positions exit kar raha hoon...")
             try:
-                self._exit_all_positions_and_stop()  #  sirf yahan, ek baar
+                ok = self._exit_all_positions_and_stop()  #  sirf yahan, ek baar
+                if not ok and getattr(self, "_eod_exit_in_progress", False):
+                    # ponytail: another thread (watchdog) holds the EOD lock and is mid
+                    # square-off — wait for it before tearing down, else the process dies
+                    # with the exit order never placed.
+                    print("[SHUTDOWN] EOD exit in progress by watchdog — waiting...")
+                    deadline = time.time() + 120
+                    while time.time() < deadline and getattr(self, "_eod_exit_in_progress", False):
+                        time.sleep(1)
             except Exception as e:
                 print(f"[SHUTDOWN] Exit failed: {e}")
         

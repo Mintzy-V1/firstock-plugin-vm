@@ -5091,7 +5091,15 @@ class AutoTrader:
         else:
             print("[SHUTDOWN] Pehle open positions exit kar raha hoon...")
             try:
-                self._exit_all_positions_and_stop()  #  sirf yahan, ek baar
+                ok = self._exit_all_positions_and_stop()  #  sirf yahan, ek baar
+                if not ok and getattr(self, "_eod_exit_in_progress", False):
+                    # ponytail: another thread (watchdog) holds the EOD lock and is mid
+                    # square-off — wait for it before tearing down, else the process dies
+                    # with the exit order never placed.
+                    print("[SHUTDOWN] EOD exit in progress by watchdog — waiting...")
+                    deadline = time.time() + 120
+                    while time.time() < deadline and getattr(self, "_eod_exit_in_progress", False):
+                        time.sleep(1)
             except Exception as e:
                 print(f"[SHUTDOWN] Exit failed: {e}")
         
