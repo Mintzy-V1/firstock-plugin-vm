@@ -1231,6 +1231,9 @@ class SessionManager:
             sl = float(s.get("stop_loss", 0.02))
             
             if sym:
+                sym = str(sym).upper().replace("-EQ", "").strip()
+                if sym == "LTIM":
+                    sym = "LTM"
                 symbols.append(sym)
                 allocations[sym] = {
                     "capital": cap,

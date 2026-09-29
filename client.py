@@ -37,7 +37,7 @@ class PredictionClient:
     "ULTRACEMCO","BAJAJFINSV","ADANIPORTS","NTPC","ONGC","ASIANPAINT",
     "JSWSTEEL","ADANIPOWER","WIPRO","ADANIENT","POWERGRID","NESTLEIND",
     "COALINDIA","INDIGO","HINDZINC","TATASTEEL","VEDL","SBILIFE","EICHERMOT",
-    "GRASIM","HINDALCO","LTIM","TVSMOTOR","DIVISLAB","HDFCLIFE","PIDILITIND",
+    "GRASIM","HINDALCO","LTM","TVSMOTOR","DIVISLAB","HDFCLIFE","PIDILITIND",
     "CHOLAFIN","BRITANNIA","AMBUJACEM","GAIL","BANKBARODA","GODREJCP",
     "HEROMOTOCO","TATAPOWER"
     }
@@ -222,6 +222,8 @@ class PredictionClient:
                 tickers = [tickers]
 
             tickers = [t.upper().replace(".NS", "").strip() for t in tickers]
+            # NSE renamed LTIM -> LTM (27 Feb 2026)
+            tickers = ["LTM" if t == "LTIM" else t for t in tickers]
             self._log(f"normalized tickers={tickers}", debug=debug, force=True)
 
             invalid = [t for t in tickers if t not in self.SUPPORTED_TICKERS]
@@ -367,6 +369,8 @@ class MarketClient:
         ist = pytz.timezone("Asia/Kolkata")
 
         ticker_key = ticker.replace(".NS", "").upper()
+        if ticker_key == "LTIM":
+            ticker_key = "LTM"
         symbol_code = self.ticker_map.get(ticker_key)
         if not symbol_code:
             print(f"[Upstox] Missing instrument key for {ticker_key}")
