@@ -271,6 +271,8 @@ class BrokerConnector:
     # ---- symbol / instrument lookup ----
     def get_symbol_token(self, tradingsymbol):
         sym = tradingsymbol.upper().replace("-EQ", "")
+        if sym == "LTIM":
+            sym = "LTM"
         for item in self._instruments:
             if not isinstance(item, dict):
                 continue
@@ -296,7 +298,13 @@ class BrokerConnector:
     @staticmethod
     def _ensure_eq(symbol: str) -> str:
         sym = (symbol or "").upper()
-        return sym if sym.endswith("-EQ") else f"{sym}-EQ"
+        if sym.endswith("-EQ"):
+            base, suffix = sym[:-3], "-EQ"
+        else:
+            base, suffix = sym, "-EQ"
+        if base == "LTIM":
+            base = "LTM"
+        return f"{base}{suffix}"
 
     # ---- normalization (Firstock rows -> Angel-like dicts for the engine) ----
     def _normalize_position_row(self, pos) -> dict:
