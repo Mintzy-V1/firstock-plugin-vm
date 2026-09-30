@@ -2404,7 +2404,14 @@ async def start_trading(config: TradingConfig ,x_plugin_api_key: str = Header(No
                 raise
 
         started_at = datetime.utcnow().isoformat()
-        sessions_store[session_id]["status"] = "trading_active"
+        # Keep session auth status authenticated (Kelly-style). Running state
+        # lives in trading_status / worker / Redis — not in sessions_store status.
+        # Avoids multi-worker stale trading_active -> live start 401.
+        sessions_store[session_id]["status"] = "authenticated"
+        print(
+            f"[START-TRADING-DEBUG] session={session_id} status kept authenticated "
+            f"(Kelly-style); trading_status=running"
+        )
         trading_status[session_id] = {
             "status": "running",
             "started_at": started_at,
@@ -2414,7 +2421,7 @@ async def start_trading(config: TradingConfig ,x_plugin_api_key: str = Header(No
             "exit_time": None,
         }
         persist_started_payload = {
-            "status": "trading_active",
+            "status": "authenticated",
             "trading_status": "running",
             "trading_started_at": started_at,
             "strategy": config.strategy,
